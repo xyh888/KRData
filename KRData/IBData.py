@@ -183,7 +183,7 @@ class IBMarket(metaclass=Singleton):
 
         return self.to_df(raw_object)
 
-    @lru_cache(maxsize=30)
+    # @lru_cache(maxsize=30)
     def get_bars_from_ib(self, contract: (Contract, str, int), barType='1 min', start=None, end=None, persist=False):
         _contract = self.verifyContract(contract)
         if start is None:
@@ -224,7 +224,11 @@ class IBMarket(metaclass=Singleton):
                 except Exception as e:
                     raise e
 
-        df = util.df(barlist).rename(columns = {'date': 'datetime'}).set_index('datetime', drop=False)[start:]
+        df = util.df(barlist)
+        if df is not None:
+            df = df.rename(columns = {'date': 'datetime'}).set_index('datetime', drop=False)[start:]
+        else:
+            df = pd.DataFrame(columns=['datetime', 'open', 'high', 'low', 'close', 'volume', 'barCount', 'average']).set_index('datetime', drop=False)
 
         return df
 
@@ -280,6 +284,7 @@ class IBMarket(metaclass=Singleton):
             forward = min(query_set.count(True), forward) if forward else None
             return query_set[backward:forward]
 
+    @lru_cache(maxsize=30)
     def verifyContract(self, contract: (Contract, str, int)) -> Contract:
         if isinstance(contract, int):
             contract = Contract(conId=contract)

@@ -7,6 +7,7 @@ THANKS FOR th github project https://github.com/moonnejs/uiKLine
 """
 
 import numpy as np
+import numba
 import pandas as pd
 import datetime as dt
 from PyQt5.QtGui import *
@@ -17,7 +18,7 @@ import pyqtgraph as pg
 import pyqtgraph.exporters
 from functools import partial
 from collections import deque
-from .baseQtItems import KeyWraper, CandlestickItem, MyStringAxis, Crosshair, CustomViewBox
+# from .baseQtItems import KeyWraper, CandlestickItem, MyStringAxis, Crosshair, CustomViewBox
 from ..HKData import HKMarket
 from ..IBData import IBMarket, IBTrade
 from ..util import _concat_executions, load_json_settings, save_json_settings
@@ -29,31 +30,24 @@ EVENT_BAR_UPDATE = 'eBarUpdate'
 DEFAULT_MA_SETTINGS = {'5': 'r', '10': 'b', '30': 'g', '60': 'm'}
 DEFAULT_MACD_SETTINGS = {'fastperiod': 12, 'slowperiod': 26, 'signalperiod': 9}
 DEFAULT_TRADE_MARK_SETTINGS = {'long': {'angle': 90, 'brush': 'b', 'headLen': 15}, 'short': {'angle': -90, 'brush': 'y', 'headLen': 15}}
+DEFAULT_SYMBOL_SETTINGS = ''
 DEFAULT_ACCOUNT_SETTINGS = ''
 SETTINGS = load_json_settings('visual_settings.json')
 MA_SETTINGS = SETTINGS.get('MA', DEFAULT_MA_SETTINGS)
 TRADE_MARK_SETTINGS = SETTINGS.get('TradeMark', DEFAULT_TRADE_MARK_SETTINGS)
 MACD_SETTINGS = SETTINGS.get('MACD', DEFAULT_MACD_SETTINGS)
+SYMBOL_SETTINGS = SETTINGS.get('SYMBOL', DEFAULT_SYMBOL_SETTINGS)
 ACCOUNT_SETTINGS = SETTINGS.get('ACCOUNT', DEFAULT_ACCOUNT_SETTINGS)
 MAX_LEN = 3000
 
-class KLineWidget(KeyWraper):
-    """用于显示价格走势图"""
 
-    # 窗口标识
-    clsId = 0
+from PyQt5 import QtWidgets
+from vnpy.app.realtime_monitor.ui.baseQtItems import MarketDataChartWidget
+from vnpy.trader.object import BarData, TradeData
+from vnpy.trader.constant import Interval, Exchange, Direction, Offset
+from vnpy.trader.utility import BarGenerator
 
-    # 保存K线数据的列表和Numpy Array对象
-    listBar = []
-    listVol = []
-    listHigh = []
-    listLow = []
-    listSig = []
-    # listOpenInterest = []
-    arrows = []
-
-    # 是否完成了历史数据的读取
-    initCompleted = False
+class KLineWidget(QtWidgets.QWidget):
 
     # ----------------------------------------------------------------------
     def __init__(self, data_source='HK', review_mode='live', **kwargs):
@@ -75,58 +69,7 @@ class KLineWidget(KeyWraper):
         else:
             self.setExecutions([])
 
-
-        self.raw_data = None
-        # 当前序号
-        self.index = None  # 下标
-        self.countK = 60  # 显示的Ｋ线范围
-
-        KLineWidget.clsId += 1
-        self.windowId = str(KLineWidget.clsId)
-
-        # 缓存数据
-        self.datas = []
-        self.listBar = []
-        self.listVol = []
-        self.listHigh = []
-        self.listLow = []
-        self.listSig = []
-        self.listMA = []
-        self.listMACD = []
-        self.listINCMUL = []
-        self.listTrade = []
-        self.listHolding = []
-        self.dictOrder = {}
-        self.arrows = []
-        self.tradeArrows = []
-        self.tradeLines = []
-        # self.tradeTexts = []
-        self.orderLines = {}
-        self.splitLines = []
-
-        # 所有K线上信号图
-        self.allColor = deque(['blue', 'green', 'yellow', 'white'])
-        self.sigData = {}
-        self.sigColor = {}
-        self.sigPlots = {}
-
-        # 所副图上信号图
-        self.allSubColor = deque(['blue', 'green', 'yellow', 'white'])
-        self.subSigData = {}
-        self.subSigColor = {}
-        self.subSigPlots = {}
-
-        self.vt_symbol = ''
-        self.symbol = ''
-        self.exchange = ''
-        self.interval = ''
-        self.barCount = 300
-        self.bar_event_type = ''
-
-
-        # 初始化完成
-        self.initCompleted = False
-
+        # self.splitLines = []
         # 调用函数
         self.initUi()
         # self.register_event()
@@ -138,38 +81,21 @@ class KLineWidget(KeyWraper):
         """初始化界面"""
         self.setWindowTitle('数据可视化')
         # 主图
-        self.pw = pg.PlotWidget()
-        # 界面布局
-        self.lay_KL = pg.GraphicsLayout(border=(100, 100, 100))
-        self.lay_KL.setContentsMargins(10, 10, 10, 10)
-        self.lay_KL.setSpacing(0)
-        self.lay_KL.setBorder(color=(255, 255, 255, 255), width=0.8)
-        self.lay_KL.setZValue(0)
-        self.KLtitle = self.lay_KL.addLabel(u'')
-        self.pw.setCentralItem(self.lay_KL)
-        # 设置横坐标
-        xdict = {}
-        self.axisTime = MyStringAxis(xdict, orientation='bottom')
-
-        self.indComboBox = QComboBox()
-        self.indComboBox.addItems(['MACD', 'INCMUL'])
-
-        # 初始化子图
-        self.initplotKline()
-        self.initplotVol()
-        self.initplotInd()
-        # 注册十字光标
-        self.crosshair = Crosshair(self.pw, self)
+        self.chart = MarketDataChartWidget()
         # 设置界面
         self.vb = QVBoxLayout()
 
-        self.symbol_line = QLineEdit("")
+        self.symbol_line = QLineEdit(SYMBOL_SETTINGS)
         self.symbol_line.setPlaceholderText('输入产品代码如: HSI1907或者369009605')
         # self.symbol_line.returnPressed.connect(self.subscribe) # todo
 
         self.interval_combo = QComboBox()
         for inteval in ['1min', '5min', '15min', '30min', '60min', '1day']:
             self.interval_combo.addItem(inteval)
+
+        self.indicator_combo = QtWidgets.QComboBox()
+        self.indicator_combo.addItems([n for n in self.chart.indicators.keys()])
+        self.indicator_combo.currentTextChanged.connect(self.chart.change_indicator)
 
         # self.export_btn = QPushButton('保存')
         # self.export_btn.clicked.connect(self.export_image)
@@ -178,7 +104,7 @@ class KLineWidget(KeyWraper):
         data_params_layout = QHBoxLayout()
         data_params_layout.addWidget(self.symbol_line)
         data_params_layout.addWidget(self.interval_combo)
-        data_params_layout.addWidget(self.indComboBox)
+        data_params_layout.addWidget(self.indicator_combo)
         data_params_layout.addStretch()
         # data_params_layout.addWidget(self.export_btn)
         self.data_params_layout = data_params_layout
@@ -191,8 +117,8 @@ class KLineWidget(KeyWraper):
         self.datetime_from.setCalendarPopup(True)
         self.datetime_to.setCalendarPopup(True)
 
-        self.trade_links = QCheckBox("Trade Link")
-        self.trade_links.stateChanged.connect(self.refreshTradeLinks)
+        # self.trade_links = QCheckBox("Trade Link")
+        # self.trade_links.stateChanged.connect(self.refreshTradeLinks)
 
         now = dt.datetime.now()
         self.datetime_from.setDateTime(now - dt.timedelta(days=1))
@@ -200,7 +126,7 @@ class KLineWidget(KeyWraper):
         timerange_layout = QHBoxLayout()
         timerange_layout.addWidget(self.datetime_from)
         timerange_layout.addWidget(self.datetime_to)
-        timerange_layout.addWidget(self.trade_links)
+        # timerange_layout.addWidget(self.trade_links)
         timerange_layout.addStretch()
         self.account_line = QLineEdit(ACCOUNT_SETTINGS)
 
@@ -252,25 +178,20 @@ class KLineWidget(KeyWraper):
 
         self.vb.addLayout(form)
 
-        self.vb.addWidget(self.pw)
+        self.vb.addWidget(self.chart)
         self.setLayout(self.vb)
         self.resize(1300, 700)
         # 初始化完成
         self.initCompleted = True
         # self.query_data()
+        self.chart.signal_new_bar_request.connect(self.update_bars_backward)
 
         # ----------------------------------------------------------------------
     def closeEvent(self, a0: QCloseEvent) -> None:
         super().closeEvent(a0)
+        SETTINGS['SYMBOL'] = self.symbol_line.text()
         SETTINGS['ACCOUNT'] = self.account_line.text()
         save_json_settings('visual_settings.json', SETTINGS)
-
-    # def export_image(self):
-    #     exporter = pg.exporters.SVGExporter(self.lay_KL)
-    #     # print( exporter.parameters())
-    #     # exporter.parameters()['width'] = 100
-    #     # exporter.parameters()['height'] = 40
-    #     exporter.export(f'{self.symbol_line.text()}.svg')
 
     def open_executions_file(self):
         fname = QFileDialog.getOpenFileName(self, '选择交易文件', './')
@@ -290,15 +211,9 @@ class KLineWidget(KeyWraper):
                     self.datetime_to.setDateTime(end + dt.timedelta(minutes=120))
                     self.query_data()
 
-    # def subscribe(self):
-    #     if self.symbol != self.symbol_line.text():
-    #         self.clearData()
-    #         self.symbol = self.symbol_line.text()
-    #         print(self.symbol)
-    #         self._query_set = self._querier[::self.symbol]
-
     def query_data(self):
         # self.clearData()
+        self.chart.clear_all()
         start = self.datetime_from.dateTime().toPyDateTime()
         end = self.datetime_to.dateTime().toPyDateTime()
         symbol = self.symbol_line.text()
@@ -335,8 +250,53 @@ class KLineWidget(KeyWraper):
         if executions:
             datas = _concat_executions(datas, executions)
 
-        self.loadData(datas)
-        self.refreshAll()
+        self.datas = datas
+        barList = []
+        tradeList = []
+        for _, d in datas.iterrows():
+            b = BarData('KRData', symbol, Exchange.HKFE, d.datetime, None,
+                        d.volume, 0, d.open, d.high, d.low, d.close)
+            barList.append(b)
+
+        for e in executions:
+            t = TradeData('KRData', symbol, Exchange.HKFE, '', '',
+                          Direction.LONG if e['direction'] == 'long' else Direction.SHORT,
+                          Offset.NONE,
+                          e['price'],
+                          e['size'],
+                          e['datetime'] if isinstance(e['datetime'], dt.datetime) else parser.parse(e['datetime'])
+                          )
+            tradeList.append(t)
+
+        self.chart.update_all(barList, tradeList, [])
+
+    def update_bars_backward(self, n):
+        if self.data_source == 'HK':
+            with self.chart.updating() as chart:
+                symbol = self.symbol_line.text()
+                start = chart._manager.get_bar(chart.last_ix).datetime
+                data = self._querier[start:n:symbol]
+
+                for d in data:
+                    b = BarData('KRData', symbol, Exchange.HKFE, d.datetime, None,
+                                d.volume, 0, d.open, d.high, d.low, d.close)
+                    chart.update_bar(b)
+        elif self.data_source == 'IB':
+            with self.chart.updating() as chart:
+                symbol = self.symbol_line.text()
+                barType = {'1min': '1 min', '5min': '5 mins', '15min': '15 mins', '30min': '30 mins', '60min': '60 mins', '1day': '1 day'}.get(self.period,'1 min')
+                minutes = {'1min': 1, '5min': 5, '15min': 15, '30min': 30, '60min': 60, '1day': 1440}.get(self.period, 1)
+                start = chart._manager.get_bar(chart.last_ix).datetime
+                per_bar_period = dt.timedelta(minutes=minutes)
+                if dt.datetime.now() - start <= per_bar_period:
+                    return
+                n = min(60, n)
+                contract = self._querier.verifyContract(symbol)
+                data = self._querier.get_bars_from_ib(contract, barType=barType, start=start, end=start + per_bar_period * n)
+                for _, d in data.iterrows():
+                    b = BarData('KRData', symbol, Exchange.HKFE, d.datetime, None,
+                                d.volume, 0, d.open, d.high, d.low, d.close)
+                    chart.update_bar(b)
 
     def setExecutions(self, executions:list):
         self.executions = executions
@@ -348,212 +308,6 @@ class KLineWidget(KeyWraper):
         if self.data_source == 'HK':
             self._querier = HKMarket(period=period)
 
-    def makePI(self, name):
-        """生成PlotItem对象"""
-        vb = CustomViewBox()
-        plotItem = pg.PlotItem(viewBox=vb, name=name, axisItems={'bottom': self.axisTime})
-        plotItem.setMenuEnabled(False)
-        plotItem.setClipToView(True)
-        plotItem.hideAxis('left')
-        plotItem.showAxis('right')
-        plotItem.setDownsampling(mode='peak')
-        plotItem.setRange(xRange=(0, 1), yRange=(0, 1))
-        plotItem.getAxis('right').setWidth(60)
-        plotItem.getAxis('right').setStyle(tickFont=QFont("Roman times", 10, QFont.Bold))
-        plotItem.getAxis('right').setPen(color=(255, 255, 255, 255), width=0.8)
-        plotItem.showGrid(True, True)
-        plotItem.hideButtons()
-        return plotItem
-
-    # ----------------------------------------------------------------------
-    def initplotVol(self):
-        """初始化成交量子图"""
-        self.pwVol = self.makePI('_'.join([self.windowId, 'PlotVOL']))
-        self.volume = CandlestickItem(self.listVol)
-        self.pwVol.addItem(self.volume)
-        self.pwVol.setMaximumHeight(150)
-        self.pwVol.setXLink('_'.join([self.windowId, 'PlotInd']))
-        self.pwVol.hideAxis('bottom')
-
-        self.lay_KL.nextRow()
-        self.lay_KL.addItem(self.pwVol)
-
-    # ----------------------------------------------------------------------
-    def initplotKline(self):
-        """初始化K线子图"""
-        self.pwKL = self.makePI('_'.join([self.windowId, 'PlotKL']))
-        self.candle = CandlestickItem(self.listBar)
-        self.pwKL.addItem(self.candle)
-        self.pwKL.addItem(self.candle.tickLine)
-        self.curveMAs = [self.pwKL.plot(pen=c, name=f'ma{p}') for p, c in MA_SETTINGS.items()]
-        self.pwKL.setMinimumHeight(350)
-        self.pwKL.setXLink('_'.join([self.windowId, 'PlotInd']))
-        self.pwKL.hideAxis('bottom')
-
-        self.lay_KL.nextRow()
-        self.lay_KL.addItem(self.pwKL)
-
-    # ----------------------------------------------------------------------
-    def initplotInd(self):
-        """初始化持仓量子图"""
-        self.pwInd = self.makePI('_'.join([self.windowId, 'PlotInd']))
-        self.curveDif = pg.PlotDataItem(pen='b', name='dif', parent=self.pwInd)
-        self.curveDea = pg.PlotDataItem(pen='m', name='dea', parent=self.pwInd)
-        self.barMacd = pg.BarGraphItem(x=[0], height=[0], width=0.5, name='macd', parent=self.pwInd)
-        self.macdItems = [self.curveDif, self.curveDea, self.barMacd]
-
-        self.curveIncMulP = pg.PlotDataItem(pen='r', name='positiveMul', parent=self.pwInd)
-        self.curveIncMulN = pg.PlotDataItem(pen='g', name='negativeMul', parent=self.pwInd)
-        self.barInc = pg.BarGraphItem(x=[0], height=[0], width=0.5, name='inc', parent=self.pwInd)
-        self.incItems = [self.curveIncMulP, self.curveIncMulN, self.barInc]
-        # print(self.pwInd.items)
-
-        def changeInc(inc):
-            if inc == 'MACD':
-                for item in self.incItems:
-                    self.pwInd.removeItem(item)
-
-                print('MACD')
-                self.pwInd.addItem(self.curveDif)
-                self.pwInd.addItem(self.curveDea)
-                self.pwInd.addItem(self.barMacd)
-            elif inc == 'INCMUL':
-                for item in self.macdItems:
-                    self.pwInd.removeItem(item)
-                print('INCMUL')
-                self.pwInd.addItem(self.curveIncMulP)
-                self.pwInd.addItem(self.curveIncMulN)
-                self.pwInd.addItem(self.barInc)
-
-
-        self.indComboBox.currentTextChanged.connect(changeInc)
-
-        changeInc(self.indComboBox.currentText())
-
-        self.lay_KL.nextRow()
-        self.lay_KL.addItem(self.pwInd)
-
-    # ----------------------------------------------------------------------
-    #  画图相关
-    # ----------------------------------------------------------------------
-    def plotVol(self, redraw=False, xmin=0, xmax=-1):
-        """重画成交量子图"""
-        if self.initCompleted:
-            self.volume.generatePicture(self.listVol[xmin:xmax], redraw)  # 画成交量子图
-
-    # ----------------------------------------------------------------------
-    def plotKline(self, redraw=False, xmin=0, xmax=-1):
-        """重画K线子图"""
-        if self.initCompleted:
-            self.candle.generatePicture(self.listBar[xmin:xmax], redraw)  # 画K线
-            for curve in self.curveMAs:
-                curve.setData(self.listMA[curve.name()][xmin:xmax])
-            self.plotMark()  # 显示开平仓信号位置
-            self.plotTradeMark()
-            self.plotSplitLines()
-
-    # ----------------------------------------------------------------------
-    def plotInd(self, xmin=0, xmax=-1):
-        """重画持仓量子图"""
-        if self.initCompleted:
-            self.curveDif.setData(self.listMACD['dif'][xmin:xmax])
-            self.curveDea.setData(self.listMACD['dea'][xmin:xmax])
-            self.barMacd.setOpts(x=self.listMACD['time_int'][xmin:xmax], height=self.listMACD['macd'][xmin:xmax],
-                                brushes=np.where(self.listMACD['macd'][xmin:xmax]>0, 'r', 'g'))
-
-            self.curveIncMulP.setData(self.listINCMUL['inc_std'][xmin:xmax])
-            self.curveIncMulN.setData(-self.listINCMUL['inc_std'][xmin:xmax])
-            std_inc_pens = pd.cut(self.listINCMUL['inc_multiple'], [-np.inf, -2, -1, 1, 2, np.inf],
-                                  labels=('g', 'y', 'l', 'b', 'r'))
-            inc_gt_std = (abs(self.listINCMUL['inc'])/ self.listINCMUL['inc_std']) > 1
-            std_inc_brushes = np.where(inc_gt_std, std_inc_pens, None)
-
-            self.barInc.setOpts(x=self.listINCMUL['time_int'][xmin:xmax], height=self.listINCMUL['inc'][xmin:xmax],
-                                pens=std_inc_pens, brushes=std_inc_brushes)
-
-            # self.curveOI.setData(np.append(self.listOpenInterest[xmin:xmax], 0), pen='w', name="OpenInterest")
-
-    # ----------------------------------------------------------------------
-
-    def addSig(self, sig, main=True):
-        """新增信号图"""
-        if main:
-            if sig in self.sigPlots:
-                self.pwKL.removeItem(self.sigPlots[sig])
-            self.sigPlots[sig] = self.pwKL.plot()
-            self.sigColor[sig] = self.allColor[0]
-            self.allColor.append(self.allColor.popleft())
-        else:
-            if sig in self.subSigPlots:
-                self.pwInd.removeItem(self.subSigPlots[sig])
-            self.subSigPlots[sig] = self.pwInd.plot()
-            self.subSigColor[sig] = self.allSubColor[0]
-            self.allSubColor.append(self.allSubColor.popleft())
-
-    # ----------------------------------------------------------------------
-    def showSig(self, datas, main=True, clear=False):
-        """刷新信号图"""
-        if clear:
-            self.clearSig(main)
-            if datas and not main:
-                sigDatas = np.array(datas.values()[0])
-                self.listOpenInterest = sigDatas
-                self.datas['openInterest'] = sigDatas
-                self.plotOI(0, len(sigDatas))
-        if main:
-            for sig in datas:
-                self.addSig(sig, main)
-                self.sigData[sig] = datas[sig]
-                self.sigPlots[sig].setData(np.append(datas[sig], 0), pen=self.sigColor[sig][0], name=sig)
-        else:
-            for sig in datas:
-                self.addSig(sig, main)
-                self.subSigData[sig] = datas[sig]
-                self.subSigPlots[sig].setData(np.append(datas[sig], 0), pen=self.subSigColor[sig][0], name=sig)
-
-    # ----------------------------------------------------------------------
-    def plotTradeMark(self):
-        """显示交易信号"""
-        for arrow in self.tradeArrows:
-            self.pwKL.removeItem(arrow)
-
-        for l in self.tradeLines:
-            self.pwKL.removeItem(l)
-
-        self.tradeArrows = []
-        self.tradeLines = []
-
-        pt = None
-        for i, t in enumerate(self.listTrade):
-            if t.direction == 'long':
-                arrow = pg.ArrowItem(pos=(t.time_int, t.price), angle=TRADE_MARK_SETTINGS['long']['angle'],
-                                     brush=TRADE_MARK_SETTINGS['long']['brush'],
-                                     headLen=TRADE_MARK_SETTINGS['long']['headLen'] * t.size)
-                # text = pg.TextItem(f'{t.size}@{t.price}', color='b', anchor=(t.time_int, t.price), rotateAxis=-45)
-                self.pwKL.addItem(arrow)
-                self.tradeArrows.append(arrow)
-            elif t.direction == 'short':
-                arrow = pg.ArrowItem(pos=(t.time_int, t.price), angle=TRADE_MARK_SETTINGS['short']['angle'],
-                                     brush=TRADE_MARK_SETTINGS['short']['brush'],
-                                     headLen=TRADE_MARK_SETTINGS['short']['headLen'] * t.size)
-                # text = pg.TextItem(f'{t.size}@{t.price}', color='y', anchor=(t.time_int, t.price), rotateAxis=45)
-                self.pwKL.addItem(arrow)
-                self.tradeArrows.append(arrow)
-
-            if pt and pt.direction != t.direction:
-                s = min(pt.size, t.size)
-                ptv = s * (pt.price if pt.direction == 'short' else -pt.price)
-                tv = s * (t.price if t.direction == 'short' else -t.price)
-                pen = pg.mkPen('r' if ptv + tv > 0 else 'g', width=1, style=QtCore.Qt.DashLine)
-                line = pg.LineSegmentROI([(pt.time_int, pt.price), (t.time_int, t.price)], pen=pen, movable=False)
-
-                self.tradeLines.append(line)
-            pt = t
-
-        if self.trade_links.checkState():
-            for l in self.tradeLines:
-                self.pwKL.addItem(l)
-
     def refreshTradeLinks(self, b):
         if b:
             for l in self.tradeLines:
@@ -561,379 +315,6 @@ class KLineWidget(KeyWraper):
         else:
             for l in self.tradeLines:
                 self.pwKL.removeItem(l)
-
-    def plotSplitLines(self):
-        for sl in self.splitLines:
-            self.pwKL.removeItem(sl)
-        else:
-            self.splitLines.clear()
-
-        pre_x = 0
-        for x in self.axisTime.x_values.item():
-            pre_t = self.axisTime.xdict[pre_x].time()
-            t = self.axisTime.xdict[x].time()
-            if  pre_t < dt.time(9, 0) < t or pre_t < dt.time(17, 0) < t or t <  dt.time(17, 0) < pre_t :
-                sl = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color='w', width=0.8, style=QtCore.Qt.DashDotLine))
-                sl.setPos((pre_x + x)/2)
-                self.pwKL.addItem(sl)
-                self.splitLines.append(sl)
-
-            pre_x = x
-
-    def plotMark(self):
-        """显示开平仓信号"""
-        # 检查是否有数据
-        if len(self.datas) == 0:
-            return
-        for arrow in self.arrows:
-            self.pwKL.removeItem(arrow)
-        # 画买卖信号
-        for i in range(len(self.listSig)):
-            # 无信号
-            if self.listSig[i] == 0:
-                continue
-            # 买信号
-            elif self.listSig[i] > 0:
-                arrow = pg.ArrowItem(pos=(i, self.datas[i]['low']), angle=90, brush=(255, 0, 0))
-            # 卖信号
-            elif self.listSig[i] < 0:
-                arrow = pg.ArrowItem(pos=(i, self.datas[i]['high']), angle=-90, brush=(0, 255, 0))
-            self.pwKL.addItem(arrow)
-            self.arrows.append(arrow)
-
-    # ----------------------------------------------------------------------
-    def updateAll(self):
-        """
-        手动更新所有K线图形，K线播放模式下需要
-        """
-        datas = self.datas
-        self.volume.pictrue = None
-        self.candle.pictrue = None
-        self.volume.update()
-        self.candle.update()
-
-        def update(view, low, high):
-            vRange = view.viewRange()
-            xmin = max(0, int(vRange[0][0]))
-            xmax = max(0, int(vRange[0][1]))
-            try:
-                xmax = min(xmax, len(datas) - 1)
-            except:
-                xmax = xmax
-            if len(datas) > 0 and xmax > xmin:
-                ymin = min(datas[xmin:xmax][low])
-                ymax = max(datas[xmin:xmax][high])
-                view.setRange(yRange=(ymin, ymax))
-            else:
-                view.setRange(yRange=(0, 1))
-
-        update(self.pwKL.getViewBox(), 'low', 'high')
-        update(self.pwVol.getViewBox(), 'volume', 'volume')
-
-    # ----------------------------------------------------------------------
-    def plotAll(self, redraw=True, xMin=0, xMax=-1):
-        """
-        重画所有界面
-        redraw ：False=重画最后一根K线; True=重画所有
-        xMin,xMax : 数据范围
-        """
-        xMax = (len(self.datas) - 1)/2 if xMax < 0 else xMax
-        # self.countK = xMax-xMin
-        # self.index = int((xMax+xMin)/2)
-        self.pwInd.setLimits(xMin=xMin, xMax=xMax)
-        self.pwKL.setLimits(xMin=xMin, xMax=xMax)
-        self.pwVol.setLimits(xMin=xMin, xMax=xMax)
-        self.plotKline(redraw, xMin, xMax)  # K线图
-        self.plotVol(redraw, xMin, xMax)  # K线副图，成交量
-        self.plotInd(0, len(self.datas))  # K线副图，指标
-        self.refresh()
-
-    # ----------------------------------------------------------------------
-    def refresh(self):
-        """
-        刷新三个子图的现实范围
-        """
-        # datas = self.datas
-        minutes = int(self.countK / 2)
-        xmin = max(0, self.index - minutes)
-        try:
-            xmax = min(xmin + 2 * minutes, len(self.datas) - 1) if self.datas else xmin + 2 * minutes
-        except:
-            xmax = xmin + 2 * minutes
-        self.pwInd.setRange(xRange=(xmin, xmax))
-        self.pwKL.setRange(xRange=(xmin, xmax))
-        self.pwVol.setRange(xRange=(xmin, xmax))
-
-    # ----------------------------------------------------------------------
-    #  快捷键相关
-    # ----------------------------------------------------------------------
-    def onNxt(self):
-        """跳转到下一个开平仓点"""
-        datalen = len(self.listBar)
-        if datalen > 0 and not self.index is None:
-            if self.index < datalen - 2: self.index += 1
-            while self.index < datalen - 2 and self.index not in self.listTrade['time_int']:
-                self.index += 1
-            self.refresh()
-            x = self.index
-            y = self.datas[x]['close']
-            self.crosshair.signal.emit((x, y))
-
-    # ----------------------------------------------------------------------
-    def onPre(self):
-        """跳转到上一个开平仓点"""
-        datalen = len(self.listBar)
-        if datalen > 0 and not self.index is None:
-            if self.index > 0: self.index -= 1
-            while self.index > 0 and self.index not in self.listTrade['time_int']:
-                self.index -= 1
-            self.refresh()
-            x = self.index
-            y = self.datas[x]['close']
-            self.crosshair.signal.emit((x, y))
-
-    # ----------------------------------------------------------------------
-    def onDown(self):
-        """放大显示区间"""
-        self.countK = min(len(self.datas), int(self.countK * 1.2) + 1)
-        self.refresh()
-        if len(self.datas) > 0:
-            x = self.index - self.countK / 2 + 2 if int(
-                self.crosshair.xAxis) < self.index - self.countK / 2 + 2 else int(self.crosshair.xAxis)
-            x = self.index + self.countK / 2 - 2 if x > self.index + self.countK / 2 - 2 else x
-            x = len(self.datas) - 1 if x > len(self.datas) - 1 else int(x)
-            y = self.datas[x][2]
-            self.crosshair.signal.emit((x, y))
-
-    # ----------------------------------------------------------------------
-    def onUp(self):
-        """缩小显示区间"""
-        self.countK = max(3, int(self.countK / 1.2) - 1)
-        self.refresh()
-        if len(self.datas) > 0:
-            x = self.index - self.countK / 2 + 2 if int(
-                self.crosshair.xAxis) < self.index - self.countK / 2 + 2 else int(self.crosshair.xAxis)
-            x = self.index + self.countK / 2 - 2 if x > self.index + self.countK / 2 - 2 else x
-            x = len(self.datas) - 1 if x > len(self.datas) - 1 else int(x)
-            y = self.datas[x]['close']
-            self.crosshair.signal.emit((x, y))
-
-    # ----------------------------------------------------------------------
-    def onLeft(self):
-        """向左移动"""
-        if len(self.datas) > 0 and int(self.crosshair.xAxis) > 2:
-            x = int(self.crosshair.xAxis) - 1
-            x = len(self.datas) - 1 if x > len(self.datas) - 1 else int(x)
-            y = self.datas[x]['close']
-            if x <= self.index - self.countK / 2 + 2 and self.index > 1:
-                self.index -= 1
-                self.refresh()
-            self.crosshair.signal.emit((x, y))
-
-    # ----------------------------------------------------------------------
-    def onRight(self):
-        """向右移动"""
-        if len(self.datas) > 0 and int(self.crosshair.xAxis) < len(self.datas) - 1:
-            x = int(self.crosshair.xAxis) + 1
-            x = len(self.datas) - 1 if x > len(self.datas) - 1 else int(x)
-            y = self.datas[x]['close']
-            if x >= self.index + int(self.countK / 2) - 2:
-                self.index += 1
-                self.refresh()
-            self.crosshair.signal.emit((x, y))
-
-    def wheelEvent(self, event):
-        """滚轮缩放"""
-        angle = event.angleDelta()
-        if angle.y() < 0:
-            self.onDown()
-        elif angle.y() > 0:
-            self.onUp()
-
-    # ----------------------------------------------------------------------
-    # 界面回调相关
-    # ----------------------------------------------------------------------
-    def onPaint(self):
-        """界面刷新回调"""
-        view = self.pwKL.getViewBox()
-        vRange = view.viewRange()
-        xmin = max(0, int(vRange[0][0]))
-        xmax = max(0, int(vRange[0][1]))
-
-        self.index = int((xmin + xmax) / 2) + 1
-
-    # ----------------------------------------------------------------------
-    def resignData(self, datas):
-        """更新数据，用于Y坐标自适应"""
-        self.crosshair.datas = datas
-        def viewXRangeChanged(low, high, vb):
-            vRange = vb.viewRange()
-            xmin = max(0, int(vRange[0][0]))
-            xmax = max(0, int(vRange[0][1]))
-            xmax = min(xmax, len(datas))
-            if len(datas) > 0 and xmax > xmin:
-                ymin = min(datas[xmin:xmax][low])
-                ymax = max(datas[xmin:xmax][high])
-                ymin, ymax = (-1, 1) if ymin == ymax else (ymin, ymax)
-                vb.setRange(yRange=(ymin, ymax))
-            else:
-                vb.setRange(yRange=(0, 1))
-
-        def viewXRangeChanged_Ind(vb):
-            vRange = vb.viewRange()
-            xmin = max(0, int(vRange[0][0]))
-            xmax = max(0, int(vRange[0][1]))
-            xmax = min(xmax, len(datas))
-            if len(datas) > 0 and xmax > xmin:
-                inc = self.indComboBox.currentText()
-                if inc == 'MACD':
-                    ymin = min(self.listMACD[xmin:xmax]['dif'])
-                    ymax = max(self.listMACD[xmin:xmax]['dif'])
-                elif inc == 'INCMUL':
-                    ymin = min(self.listINCMUL[xmin:xmax]['inc'])
-                    ymax = max(self.listINCMUL[xmin:xmax]['inc'])
-
-                ymin, ymax = (-1, 1) if ymin == ymax else (ymin, ymax)
-                if not any(np.isnan([ymin, ymax])):
-                    vb.setRange(yRange=(ymin, ymax))
-            else:
-                vb.setRange(yRange=(0, 1))
-
-        view = self.pwKL.getViewBox()
-        view.sigXRangeChanged.connect(partial(viewXRangeChanged, 'low', 'high'))
-
-        view = self.pwVol.getViewBox()
-        view.sigXRangeChanged.connect(partial(viewXRangeChanged, 'volume', 'volume'))
-
-        view = self.pwInd.getViewBox()
-        view.sigXRangeChanged.connect(partial(viewXRangeChanged_Ind))
-
-    # ----------------------------------------------------------------------
-    # 数据相关
-    # ----------------------------------------------------------------------
-    def clearData(self):
-        """清空数据"""
-        # 清空数据，重新画图
-        self.time_index = []
-        self.listBar = []
-        self.listVol = []
-        self.listLow = []
-        self.listHigh = []
-        self.listMA = []
-        self.listMACD = []
-        self.listINCMUL = []
-        self.listSig = []
-        self.sigData = {}
-        self.datas = []
-
-        self.listTrade = []
-        self.listHolding = []
-        self.dictOrder = {}
-        self.tradeArrows = []
-        self.tradeLines = []
-        self.orderLines = {}
-        self.splitLines = []
-
-    # ----------------------------------------------------------------------
-    def clearSig(self, main=True):
-        """清空信号图形"""
-        # 清空信号图
-        if main:
-            for sig in self.sigPlots:
-                self.pwKL.removeItem(self.sigPlots[sig])
-            self.sigData = {}
-            self.sigPlots = {}
-        else:
-            for sig in self.subSigPlots:
-                self.pwInd.removeItem(self.subSigPlots[sig])
-            self.subSigData = {}
-            self.subSigPlots = {}
-
-    # ----------------------------------------------------------------------
-    def updateSig(self, sig):
-        """刷新买卖信号"""
-        self.listSig = sig
-        self.plotMark()
-
-    # ----------------------------------------------------------------------
-    def loadData(self, datas: pd.DataFrame,  trades=None, sigs=None):
-        """
-        载入pandas.DataFrame数据
-        datas : 数据格式，cols : datetime, open, close, low, high
-        """
-        # 设置中心点时间
-        # 绑定数据，更新横坐标映射，更新Y轴自适应函数，更新十字光标映射
-        for p in MA_SETTINGS.keys():
-            datas[f'ma{p}'] = talib.MA(datas['close'].values, int(p))
-
-        datas['dif'], datas['dea'], datas['macd'] = talib.MACDEXT(datas['close'].values, fastperiod=MACD_SETTINGS['fastperiod'], fastmatype=1,
-                                                slowperiod=MACD_SETTINGS['slowperiod'], slowmatype=1, signalperiod=MACD_SETTINGS['signalperiod'], signalmatype=1)
-        datas['macd'] = datas['macd'] * 2
-
-        datas['inc'] = datas['close'] - datas['open']
-        datas['inc_std'] = talib.STDDEV(datas['inc'].values, timeperiod=60)
-        datas['inc_multiple'] = (datas['inc'] / datas['inc_std']).fillna(0)
-
-        datas['time_int'] = np.array(range(len(datas)))
-        # trades = trades.merge(datas['time_int'], how='left', left_index=True, right_index=True)
-        self.datas = datas[['open', 'close', 'low', 'high', 'volume']].to_records()
-        self.axisTime.xdict = {}
-        xdict = dict(enumerate(datas.index.tolist()))
-        self.axisTime.update_xdict(xdict)
-        self.resignData(self.datas)
-        # 更新画图用到的数据
-        self.listBar = datas[['time_int', 'open', 'close', 'low', 'high']].to_records(False)
-        self.listHigh = list(datas['high'])
-        self.listLow = list(datas['low'])
-        self.listMA = datas[[f'ma{p}' for p in MA_SETTINGS.keys()]].to_records(False)
-        self.listMACD = datas[['time_int', 'dif', 'dea', 'macd']].to_records(False)
-        self.listINCMUL = datas[['time_int', 'inc', 'inc_std', 'inc_multiple']].to_records(False)
-        # self.listOpenInterest = list(datas['openInterest'])
-        self.listSig = [0] * (len(self.datas) - 1) if sigs is None else sigs
-        self.listHolding = []
-        if 'trades' in datas.columns:
-            trades = []
-            holding = []
-            pos = 0
-            total_value = 0
-            for _, row in datas.iterrows():
-                if isinstance(row['trades'], Iterable):
-                    for t in row['trades']:
-                        cur_size = t['size'] if t['direction'] == 'long' else -t['size']
-                        pos += cur_size
-                        total_value += t['price'] * cur_size
-                        trades.append([row['time_int'], t['direction'], t['price'], t['size']])
-
-                holding.append([row['time_int'], pos, total_value])
-            else:
-                if trades:
-                    self.listTrade = pd.DataFrame(trades, columns=['time_int', 'direction', 'price', 'size']).to_records(False)
-                    self.listHolding = pd.DataFrame(holding, columns=['time_int', 'pos', 'total_value']).to_records(False)
-                else:
-                    self.listTrade = []
-                    self.listHolding = []
-        # 成交量颜色和涨跌同步，K线方向由涨跌决定
-        datas0 = pd.DataFrame()
-        datas0['open'] = datas.apply(lambda x: 0 if x['close'] >= x['open'] else x['volume'], axis=1)
-        datas0['close'] = datas.apply(lambda x: 0 if x['close'] < x['open'] else x['volume'], axis=1)
-        datas0['low'] = 0
-        datas0['high'] = datas['volume']
-        datas0['time_int'] = np.array(range(len(datas.index)))
-        self.listVol = datas0[['time_int', 'open', 'close', 'low', 'high']].to_records(False)
-
-
-
-    # ----------------------------------------------------------------------
-    def refreshAll(self, redraw=True, update=False):
-        """
-        更新所有界面
-        """
-        # 调用画图函数
-        self.index = len(self.datas)
-        self.plotAll(redraw, 0, len(self.datas))
-        if not update:
-            self.updateAll()
-        self.crosshair.signal.emit((None, None))
 
 
 class ExecutionsMonitor(QWidget):
@@ -1159,7 +540,7 @@ class TradesMonitor(QWidget):
         self.setLayout(vbox)
         self.klineWidget = KLineWidget(data_source='HK', review_mode='backtest', parent=self)
         self.klineWidget.executions_file_btn.setEnabled(False)
-        self.klineWidget.pwKL.removeItem(self.klineWidget.candle.tickLine)
+        # self.klineWidget.pwKL.removeItem(self.klineWidget.candle.tickLine)
         self.left_btn = QToolButton()
         self.right_btn = QToolButton()
         self.left_btn.setArrowType(Qt.LeftArrow)
@@ -1176,10 +557,11 @@ class TradesMonitor(QWidget):
         fields = []
         if not self.trades:
             return
-
+        print(self.trades)
         for k1 in self.trades[0]:
-            for k2 in self.trades[0][k1]:
-                fields.append(f'{k2}_{k1}')
+            if isinstance(self.trades[0][k1], dict):
+                for k2 in self.trades[0][k1]:
+                    fields.append(f'{k2}_{k1}')
 
         # fields = ['datetime_open', 'price_open', 'size_open', 'direction_open', 'datetime_close', 'price_close', 'size_close', 'direction_close']
         table.setColumnCount(len(fields) + 2)
@@ -1197,7 +579,7 @@ class TradesMonitor(QWidget):
                 v = tradeData.get(oc, {}).get(f)
                 cell = QTableWidgetItem()
                 cell.setFlags(QtCore.Qt.ItemIsEnabled)
-                cell.setData(Qt.DisplayRole, v)
+                cell.setData(Qt.DisplayRole, v if isinstance(v, (int, float)) else str(v))
 
                 cell.setTextAlignment(QtCore.Qt.AlignCenter)
                 table.setItem(r, c + 1, cell)
@@ -1233,7 +615,7 @@ class TradesMonitor(QWidget):
                         if len(splited) == 2:
                             d.setdefault(splited[1], {})[splited[0]] = t[i]
                         elif len(splited) == 1:
-                            d[splited[0]] == t[i]
+                            d[splited[0]] = t[i]
                     else:
                         self.trades.append(d)
 
@@ -1270,3 +652,305 @@ class TradesMonitor(QWidget):
     def nxt_visual(self):
         r = min(self.table.rowCount(), self._row + 1)
         self.visulize(r, 0)
+
+class CorrelationMonitor(QWidget):
+    signal_new_corr = QtCore.pyqtSignal((dt.datetime, float, float))
+    signal_process = QtCore.pyqtSignal(int)
+
+    class DataFetcher(QThread):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            from KRData.HKData import HKFuture
+            self.hf = HKFuture()
+            self.finished.connect(self.parent().show_data_fetch_finished)
+
+        def run(self) -> None:
+            parent = self.parent()
+            if parent:
+                parent.raw_data['HSI'] = self.hf.get_main_contract_bars('HSI', start='20190101')
+
+    def __init__(self):
+        super().__init__()
+        self.interval = 1
+        self.raw_data = {}
+        self.period = 0
+        self._selected_row = 0
+        self.data_fetcher = self.DataFetcher(self)
+        self.hkm = HKMarket()
+        self.data_fetcher.start()
+
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle('相关性对比')
+        self.setAcceptDrops(True)
+        self.target_chart_widget = KLineWidget()
+        # self.target_chart_widget.interval_combo.setEnabled(False)
+        self.source_chart_widget = MarketDataChartWidget()
+        self.compare_btn = QPushButton('历史数据对照')
+        self.interval_combo = QComboBox()
+        for i in [1, 5, 10, 15, 30, 60]:
+            self.interval_combo.addItem(f'{i} min', i)
+
+        self.save_btn = QPushButton('保存数据')
+
+        # self.compare_btn.clicked.connect(self.calc_corr)
+        # self.forward_num = QtWidgets.QLineEdit('30')
+        # self.target_chart_widget.indicator_combo.currentTextChanged.connect(self.source_chart_widget.change_indicator)
+
+        self.corr_table = QTableWidget()
+        self.corr_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.corr_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.corr_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.corr_table.verticalHeader().setVisible(False)
+        self.corr_table.setSortingEnabled(True)
+        # self.corr_table.cellDoubleClicked.connect(self.show_corr_chart)
+
+        self.process_bar = QtWidgets.QProgressBar()
+
+        self.vb = QHBoxLayout()
+        inner_vb = QVBoxLayout()
+
+        inner_vb.addWidget(self.target_chart_widget)
+        btn_hbox = QHBoxLayout()
+        btn_hbox.addWidget(self.compare_btn, 3)
+        btn_hbox.addWidget(self.interval_combo, 1)
+        # btn_hbox.addWidget(self.forward_num, 2)
+        btn_hbox.addWidget(self.process_bar, 5)
+        btn_hbox.addWidget(self.save_btn, 1)
+        inner_vb.addLayout(btn_hbox)
+        inner_vb.addWidget(self.source_chart_widget)
+
+        self.vb.addLayout(inner_vb, 8)
+        self.vb.addWidget(self.corr_table, 2)
+
+        self.setLayout(self.vb)
+        self.resize(1500, 1000)
+
+        self.init_signal()
+
+    def init_signal(self):
+        def change_interval(index):
+            val = self.interval_combo.itemData(index)
+            self.interval = val
+            self.show_corr_chart(self._selected_row, 0)
+
+        self.interval_combo.currentIndexChanged.connect(change_interval)
+        self.compare_btn.clicked.connect(self.calc_corr)
+        self.target_chart_widget.indicator_combo.currentTextChanged.connect(self.source_chart_widget.change_indicator)
+        self.corr_table.cellDoubleClicked.connect(self.show_corr_chart)
+        self.source_chart_widget.signal_new_bar_request.connect(self.update_bars_backward)
+        self.signal_process.connect(self.process_bar.setValue)
+        self.signal_new_corr.connect(self.insert_corr)
+        self.save_btn.clicked.connect(self.save_corr_data)
+
+    def update_bars_backward(self, n):
+        source_data = self.raw_data['HSI']
+        last_bar = self.bar_generator.last_bar
+        if last_bar is None:
+            return
+        start = last_bar.datetime
+        end = source_data.datetime.shift(-n)[start]
+        data = source_data[start:end]
+
+        for _, d in data.iterrows():
+            b = BarData('KRData', d.code, Exchange.HKFE, d.datetime, None,
+                        d.volume, 0, d.open, d.high, d.low, d.close)
+            self.bar_generator.update_bar(b)
+
+
+    def calc_corr(self):
+        if not self.data_fetcher.isFinished():
+            QMessageBox.critical(self, 'DataFetcher', '数据未加载完毕！', QMessageBox.Ok)
+            return
+        import scipy.stats as st
+        target_data = self.target_chart_widget.datas
+        source_data = self.raw_data['HSI']
+
+        apply_func_dict = {'datetime': 'last',
+                           'code': 'first',
+                           'open': 'first',
+                           'high': 'max',
+                           'low': 'min',
+                           'close': 'last',
+                           'volume': 'sum',
+                           'trade_date': 'first'
+                           }
+
+        ktype = {'1min': '1T', '5min': '5T', '15min': '15T',
+                 '30min': '30T', '60min': '60T', '1day': '1D'}.get(self.target_chart_widget.period)
+        if ktype:
+            self.data = source_data.resample(ktype).apply(apply_func_dict)
+            self.data.dropna(thresh=2, inplace=True)
+            self.data.datetime = self.data.index
+        else:
+            self.data = source_data
+
+        target_values = target_data.close.values
+        self.process_bar.setValue(0)
+        @numba.jit
+        def corr(nd):
+            return st.pearsonr(nd, target_values)
+
+        self.period = len(target_data)
+        # ret = source_data.close.rolling(self.period).apply(corr)
+
+        table = self.corr_table
+        table.clearContents()
+        table.setColumnCount(3)
+        # table.setRowCount(len(ret))
+        table.setHorizontalHeaderLabels(['datetime', 'corr', 'p'])
+        count = len(self.data)
+
+        corr_data = []
+        for i in range(self.period, count, 10):
+            data = (self.data.datetime[i], *corr(self.data.close.values[i - self.period:i]))
+            process_value = (i + 10) * 100 // count
+            self.signal_process.emit(process_value)
+            self.signal_new_corr.emit(*data)
+            corr_data.append(data)
+        else:
+            self.corr_data = pd.DataFrame(corr_data, columns=['datetime', 'corr', 'p'])
+
+    def insert_corr(self, d, corr, p):
+        table = self.corr_table
+        r = table.rowCount()
+        table.insertRow(r)
+        dt_cell = QTableWidgetItem()
+        dt_cell.setFlags(QtCore.Qt.ItemIsEnabled)
+        dt_cell.setData(Qt.DisplayRole, str(d))
+        dt_cell.setTextAlignment(QtCore.Qt.AlignCenter)
+
+        corr_cell = QTableWidgetItem()
+        corr_cell.setFlags(QtCore.Qt.ItemIsEnabled)
+        corr_cell.setData(Qt.DisplayRole, 0 if np.isnan(corr) else corr)
+        corr_cell.setTextAlignment(QtCore.Qt.AlignCenter)
+
+        p_cell = QTableWidgetItem()
+        p_cell.setFlags(QtCore.Qt.ItemIsEnabled)
+        p_cell.setData(Qt.DisplayRole, p)
+        p_cell.setTextAlignment(QtCore.Qt.AlignCenter)
+
+
+        table.setItem(r, 0, dt_cell)
+        table.setItem(r, 1, corr_cell)
+        table.setItem(r, 2, p_cell)
+
+    def show_corr_chart(self, r, c):
+        self._selected_row = r
+        _end = self.corr_table.item(r, 0).text()
+
+        source_data = self.raw_data['HSI']
+        forward = 1
+        start = self.data.shift(self.period).asof(_end).datetime
+        end = self.data.shift(-forward).asof(_end).datetime
+        data = source_data.loc[start:end]
+        self.source_chart_widget.clear_all()
+        # barList = []
+        if self.interval >= 60:
+            self.bar_generator = BarGenerator(None, 1, self.source_chart_widget.update_bar, Interval.HOUR)
+        else:
+            self.bar_generator = BarGenerator(None, self.interval, self.source_chart_widget.update_bar, Interval.MINUTE)
+
+        for _, d in data.iterrows():
+            b = BarData('KRData', d.code, Exchange.HKFE, d.datetime, None,
+                        d.volume, 0, d.open, d.high, d.low, d.close)
+            self.bar_generator.update_bar(b)
+            if d.datetime == parser.parse(_end):
+                last_bar = self.source_chart_widget._manager.get_bar(self.source_chart_widget.last_ix)
+                self.source_chart_widget.add_splitLine(last_bar.datetime)
+            # barList.append(b)
+        # self.source_chart_widget.update_all(barList, [], [])
+        # self.source_chart_widget.add_splitLine(barList[-forward].datetime, offset=0.5)
+
+    def save_corr_data(self):
+        if not hasattr(self, 'self.corr_data'):
+            return
+
+        target_data = self.target_chart_widget.datas
+        target_start = target_data.iloc[0].datetime
+        target_end = target_data.iloc[-1].datetime
+
+        s = {}
+        s['start'] = target_start
+        s['end'] = target_end
+        s['symbol'] = self.target_chart_widget.symbol_line.text()
+        s['period'] = self.target_chart_widget.period
+        s['source'] = self.target_chart_widget.data_source
+        s['data'] = self.corr_data
+
+        # data.to_excel(f'{target_start}-{target_end}.xls', sheet_name=self.target_chart_widget.period)
+        import pickle
+        with open(f'{target_start.strftime("%Y%m%dT%H%M%S")}_{target_end.strftime("%Y%m%dT%H%M%S")}.pkl', 'wb') as f:
+            pickle.dump(s, f)
+
+    def load_corr_data(self, file_name):
+        if not self.data_fetcher.isFinished():
+            QMessageBox.critical(self, 'DataFetcher', '数据未加载完毕！', QMessageBox.Ok)
+            return
+
+        import pickle
+        with open(file_name, 'rb') as f:
+            s = pickle.load(f)
+
+        self.target_chart_widget.symbol_line.setText(s['symbol'])
+        self.target_chart_widget.datetime_from.setDateTime(s['start'])
+        self.target_chart_widget.datetime_to.setDateTime(s['end'])
+        self.target_chart_widget.interval_combo.setCurrentText(s['period'])
+        if s['source'] == 'HK':
+            self.target_chart_widget.source_HK_btn.setChecked(True)
+        elif s['source'] == 'IB':
+            self.target_chart_widget.source_IB_btn.setChecked(True)
+
+        self.corr_table.clearContents()
+        self.corr_table.setColumnCount(3)
+        # table.setRowCount(len(ret))
+        self.corr_table.setHorizontalHeaderLabels(['datetime', 'corr', 'p'])
+
+        for _, d in s['data'].iterrows():
+            self.insert_corr(d['datetime'], d['corr'], d['p'])
+
+        source_data = self.raw_data['HSI']
+
+        apply_func_dict = {'datetime': 'last',
+                           'code': 'first',
+                           'open': 'first',
+                           'high': 'max',
+                           'low': 'min',
+                           'close': 'last',
+                           'volume': 'sum',
+                           'trade_date': 'first'
+                           }
+
+        ktype = {'1min': '1T', '5min': '5T', '15min': '15T',
+                 '30min': '30T', '60min': '60T', '1day': '1D'}.get(self.target_chart_widget.period)
+        if ktype:
+            self.data = source_data.resample(ktype).apply(apply_func_dict)
+            self.data.dropna(thresh=2, inplace=True)
+            self.data.datetime = self.data.index
+        else:
+            self.data = source_data
+
+        self.target_chart_widget.query_btn.click()
+        self.period = len(self.target_chart_widget.datas)
+
+    def show_data_fetch_finished(self):
+        QMessageBox.information(self, 'DataFetcher', '数据加载完毕！', QMessageBox.Ok)
+
+    def closeEvent(self, a0: QCloseEvent) -> None:
+        self.target_chart_widget.closeEvent(a0)
+        self.source_chart_widget.closeEvent(a0)
+        super().closeEvent(a0)
+
+    def dragEnterEvent(self, a0: QDragEnterEvent) -> None:
+        super().dragEnterEvent(a0)
+        if a0.mimeData().hasFormat('text/plain'):
+            a0.accept()
+        else:
+            a0.ignore()
+
+    def dropEvent(self, a0: QDropEvent) -> None:
+        super().dropEvent(a0)
+
+        file_name = a0.mimeData().text().lstrip('file:/')
+        self.load_corr_data(file_name)
